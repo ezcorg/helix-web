@@ -34,7 +34,7 @@ async function main() {
 
   // 2. Initialize wasmer SDK
   setStatus("Loading WASIX runtime...");
-  await initWasmer({ log: "warn" });
+  await initWasmer({ log: "warn,wasmer_wasix::syscalls::wasix::dl_env=info" });
   term.write("WASIX runtime loaded\r\n");
 
   // 3. Load and compile the helix wasm binary
@@ -85,10 +85,17 @@ async function main() {
         COLORTERM: "truecolor",
         HOME: "/home",
         HELIX_RUNTIME: "/runtime",
-        RUST_BACKTRACE: "1",
+        RUST_BACKTRACE: "full",
       },
       mount: {
         "/tmp": new Directory({
+          "test.json": `{
+  "name": "helix-web",
+  "version": "1.0",
+  "description": "Helix in the browser with syntax highlighting!",
+  "features": ["tree-sitter", "wasix", "wasm"]
+}
+`,
           "hello.rs": `// Helix running on WASIX in your browser!
 fn main() {
     let message = "Hello from WebAssembly!";

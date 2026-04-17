@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+<head><title>Defined table + cross-instance call_indirect</title></head>
+<body>
+<pre id="log"></pre>
+<script>
+const log = (msg) => { document.getElementById('log').textContent += msg + '\n'; console.log(msg); };
+
+async function test() {
+    log('=== Defined (not imported) table + cross-instance call_indirect ===\n');
+
+    // Module C: DEFINES its own table (like helix does)
+    const cBytes = await fetch('/test-c.wasm').then(r => r.arrayBuffer());
+    const cMod = new WebAssembly.Module(cBytes);
+    const cInst = new WebAssembly.Instance(cMod);
+
+    const table = cInst.exports.__indirect_function_table;
+    log('Module C instantiated');
+    log('  Table size: ' + table.length);
+    log('  local42(): ' + cInst.exports.local42());
+
+    // Test 1: Same-instance — grow first since table starts small
+    table.grow(10);
+    log('  Table after grow: ' + table.length);
+    table.set(1, cInst.exports.local42);
+    try {
+        log('  call_fn(1) [same instance]: ' + cInst.exports.call_fn(1) + ' ✅');
+    } catch(e) {
+        log('  call_fn(1) FAILED: ' + e.message + ' ❌');
+    }
+
+    // Module B: simple function from different instance
+    const bBytes = await fetch('/test-b.wasm').then(r => r.arrayBuffer());
+    const bMod = new WebAssembly.Module(bBytes);
+    const bInst = new WebAssembly.Instance(bMod);
+    log('\nModule B get99(): ' + bInst.exports.get99());
+
+    // Test 2: Cross-instance on DEFINED table
+    table.set(2, bInst.exports.get99);
+    try {
+        const r = cInst.exports.call_fn(2);
+        log('  call_fn(2) [cross-instance, DEFINED table]: ' + r + (r === 99 ? ' ✅' : ' ❌'));
+    } catch(e) {
+        log('  call_fn(2) FAILED: ' + e.message + ' ❌');
+    }
+
+    // Test 3: Grow defined table, place cross-instance func
+    const prevLen = table.length;
+    table.grow(5);
+    table.set(prevLen, bInst.exports.get99);
+    try {
+        const r = cInst.exports.call_fn(prevLen);
+        log('  call_fn(' + prevLen + ') [after grow, DEFINED table]: ' + r + (r === 99 ? ' ✅' : ' ❌'));
+    } catch(e) {
+        log('  call_fn(' + prevLen + ') FAILED: ' + e.message + ' ❌');
+    }
+
+    // Test 4: PIC grammar on DEFINED table
+    log('\n--- PIC Grammar on DEFINED table ---');
+    const grammarBytes = await fetch('/grammars/json.wasm').then(r => r.arrayBuffer());
+    const grammarMod = new WebAssembly.Module(grammarBytes);
+    const mem = new WebAssembly.Memory({initial: 2048, maximum: 65536, shared: true});
+
+    const tableBase = table.length;
+    table.grow(1);
+    const memBase = 67108864;
+
+    const grammarInst = new WebAssembly.Instance(grammarMod, {
+        env: {
+            memory: mem,
+            __indirect_function_table: table,
+            __memory_base: new WebAssembly.Global({value: 'i32', mutable: false}, memBase),
+            __table_base: new WebAssembly.Global({value: 'i32', mutable: false}, tableBase),
+        }
+    });
+
+    if (grammarInst.exports.__wasm_apply_data_relocs) grammarInst.exports.__wasm_apply_data_relocs();
+    if (grammarInst.exports.__wasm_call_ctors) grammarInst.exports.__wasm_call_ctors();
+
+    const ptr = grammarInst.exports.tree_sitter_json();
+    log('  tree_sitter_json() = ' + ptr + ', ABI=' + new DataView(mem.buffer).getUint32(ptr, true));
+
+    // Place in table
+    const tsIdx = table.length;
+    table.grow(1);
+    table.set(tsIdx, grammarInst.exports.tree_sitter_json);
+
+    try {
+        const r = cInst.exports.call_fn(tsIdx);
+        log('  call_fn(' + tsIdx + ') [grammar on DEFINED table]: ' + r + (r === ptr ? ' ✅' : ' ❌'));
+    } catch(e) {
+        log('  call_fn(' + tsIdx + ') FAILED: ' + e.message + ' ❌');
+    }
+
+    log('\n=== Test complete ===');
+}
+
+test().catch(e => log('ERROR: ' + e.stack));
+</script>
+</body>
+</html>
