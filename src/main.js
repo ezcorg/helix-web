@@ -125,18 +125,27 @@ async function main() {
   const runtimeFileCount = Object.keys(runtimeFiles).length;
   term.write(`Loaded ${runtimeFileCount} runtime files\r\n`);
 
-  // 5. Load rust-analyzer for LSP support
-  setStatus("Loading rust-analyzer...");
+  // 5. Load rust-analyzer and rustc for LSP support
+  setStatus("Loading LSP tools...");
   let rustAnalyzerBytes = null;
+  let rustcBytes = null;
   try {
-    const raResp = await fetch("/rust-analyzer.wasm");
+    const [raResp, rcResp] = await Promise.all([
+      fetch("/rust-analyzer.wasm"),
+      fetch("/rustc.wasm"),
+    ]);
     if (raResp.ok) {
       rustAnalyzerBytes = new Uint8Array(await raResp.arrayBuffer());
       const raSize = (rustAnalyzerBytes.length / 1024 / 1024).toFixed(1);
       term.write(`Loaded rust-analyzer.wasm (${raSize} MB)\r\n`);
     }
+    if (rcResp.ok) {
+      rustcBytes = new Uint8Array(await rcResp.arrayBuffer());
+      const rcSize = (rustcBytes.length / 1024 / 1024).toFixed(1);
+      term.write(`Loaded rustc.wasm (${rcSize} MB)\r\n`);
+    }
   } catch (e) {
-    console.warn("rust-analyzer.wasm not found, LSP disabled");
+    console.warn("LSP tools not found:", e);
   }
 
   // 6. Run directly with runWasix — pass raw bytes, not pre-compiled Module.
@@ -242,11 +251,10 @@ overrideCommand = []
         }),
         "/helix-cache/helix": new Directory(),
         "/runtime": new Directory(runtimeFiles),
-        "/usr/bin": new Directory(
-          rustAnalyzerBytes
-            ? { "rust-analyzer": rustAnalyzerBytes }
-            : {},
-        ),
+        "/usr/bin": new Directory({
+          ...(rustAnalyzerBytes ? { "rust-analyzer": rustAnalyzerBytes } : {}),
+          ...(rustcBytes ? { "rustc": rustcBytes } : {}),
+        }),
       },
     });
   } catch (e) {
