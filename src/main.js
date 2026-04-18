@@ -14,9 +14,28 @@ async function main() {
   setStatus("Loading terminal...");
   await initGhostty();
 
+  // Measure font metrics to calculate initial cols/rows from container size
+  const fontFamily = '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace';
+  const fontSize = 12;
+  const measureCanvas = document.createElement("canvas").getContext("2d");
+  measureCanvas.font = `${fontSize}px ${fontFamily}`;
+  const charMetrics = measureCanvas.measureText("M");
+  const cellWidth = Math.ceil(charMetrics.width);
+  const cellAscent = charMetrics.actualBoundingBoxAscent || fontSize * 0.8;
+  const cellDescent = charMetrics.actualBoundingBoxDescent || fontSize * 0.2;
+  const cellHeight = Math.ceil(cellAscent + cellDescent) + 2;
+
+  const terminalEl = document.getElementById("terminal");
+  const containerWidth = terminalEl.clientWidth || window.innerWidth;
+  const containerHeight = terminalEl.clientHeight || window.innerHeight;
+  const initialCols = Math.max(2, Math.floor(containerWidth / cellWidth));
+  const initialRows = Math.max(2, Math.floor(containerHeight / cellHeight));
+
   const term = new Terminal({
-    fontFamily: '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace',
-    fontSize: 14,
+    fontFamily,
+    fontSize,
+    cols: initialCols,
+    rows: initialRows,
     theme: {
       background: "#1a1a2e",
       foreground: "#e0e0e0",
@@ -24,10 +43,47 @@ async function main() {
     },
   });
 
+  // -- Intercept modifier key combos at the document level so the browser
+  //    does not steal Ctrl+S (save dialog), Ctrl+W (close tab), Ctrl+N
+  //    (new window), etc. before they reach the terminal's InputHandler.
+  //    We only suppress defaults while the terminal element (or a descendant
+  //    like the hidden textarea) has focus.
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      // Only intercept when the terminal (or its children) is focused
+      if (!terminalEl.contains(document.activeElement)) return;
+
+      // Let the browser handle Cmd/Ctrl+V (paste), Cmd+C (copy), and
+      // Cmd/Ctrl+Shift+I / F12 (devtools) so those remain functional.
+      const isMeta = e.metaKey;
+      const isCtrl = e.ctrlKey;
+      if ((isMeta || isCtrl) && e.code === "KeyV") return;
+      if (isMeta && e.code === "KeyC") return;
+      if ((isMeta || isCtrl) && e.shiftKey && e.code === "KeyI") return;
+      if (e.code === "F12") return;
+      // Also let Cmd/Ctrl+Shift+J (console), Cmd+Option+I (macOS devtools) through
+      if ((isMeta || isCtrl) && e.shiftKey && e.code === "KeyJ") return;
+      if (isMeta && e.altKey && e.code === "KeyI") return;
+
+      // For any other modified key combo (Ctrl+S, Ctrl+C, Alt+X, etc.),
+      // prevent the browser's default action so the keydown event reaches
+      // ghostty-web's InputHandler unimpeded.
+      if (isCtrl || e.altKey || isMeta) {
+        e.preventDefault();
+      }
+    },
+    { capture: true },
+  );
+
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
-  term.open(document.getElementById("terminal"));
+  term.open(terminalEl);
   fitAddon.fit();
+
+  // Use ResizeObserver via FitAddon for robust container-driven resizing,
+  // plus a fallback window resize listener.
+  fitAddon.observeResize();
   window.addEventListener("resize", () => fitAddon.fit());
 
   term.write("Helix on WASIX\r\n");
@@ -69,23 +125,48 @@ async function main() {
   const runtimeFileCount = Object.keys(runtimeFiles).length;
   term.write(`Loaded ${runtimeFileCount} runtime files\r\n`);
 
-  // 5. Run directly with runWasix — pass raw bytes, not pre-compiled Module.
+  // 5. Load rust-analyzer for LSP support
+  setStatus("Loading rust-analyzer...");
+  let rustAnalyzerBytes = null;
+  try {
+    const raResp = await fetch("/rust-analyzer.wasm");
+    if (raResp.ok) {
+      rustAnalyzerBytes = new Uint8Array(await raResp.arrayBuffer());
+      const raSize = (rustAnalyzerBytes.length / 1024 / 1024).toFixed(1);
+      term.write(`Loaded rust-analyzer.wasm (${raSize} MB)\r\n`);
+    }
+  } catch (e) {
+    console.warn("rust-analyzer.wasm not found, LSP disabled");
+  }
+
+  // 6. Run directly with runWasix — pass raw bytes, not pre-compiled Module.
   // The SDK needs the raw bytes for js-serializable-module to work
   // (transferring the module to Web Workers for thread spawning).
   setStatus("Starting helix...");
   term.write("Starting helix...\r\n");
+
+  // Re-fit now so we have accurate cols/rows before launching the WASIX process
+  fitAddon.fit();
 
   let instance;
   try {
     instance = await runWasix(wasmBytes, {
       program: "hx",
       args: ["/tmp/hello.rs"],
+      cols: term.cols,
+      rows: term.rows,
       env: {
         TERM: "xterm-256color",
         COLORTERM: "truecolor",
         HOME: "/home",
         HELIX_RUNTIME: "/runtime",
+        PATH: "/usr/bin:/bin",
+        XDG_CONFIG_HOME: "/helix-config",
+        XDG_DATA_HOME: "/helix-data",
+        XDG_CACHE_HOME: "/helix-cache",
         RUST_BACKTRACE: "full",
+        COLUMNS: String(term.cols),
+        LINES: String(term.rows),
       },
       mount: {
         "/tmp": new Directory({
@@ -110,9 +191,62 @@ fn main() {
     }
 }
 `,
+          "Cargo.toml": `[package]
+name = "hello"
+version = "0.1.0"
+edition = "2021"
+`,
+          "rust-project.json": JSON.stringify({
+            sysroot_src: null,
+            crates: [
+              {
+                display_name: "hello",
+                root_module: "/tmp/hello.rs",
+                edition: "2021",
+                deps: [],
+                cfg: [
+                  "target_arch=\"wasm32\"",
+                  "target_os=\"wasi\"",
+                ],
+                is_workspace_member: true,
+              },
+            ],
+          }),
+          ".helix/languages.toml": `[language-server.rust-analyzer.config]
+cargo.buildScripts.enable = false
+cargo.sysroot = "discover"
+cargo.sysrootSrc = "/nonexistent"
+procMacro.enable = false
+diagnostics.disabled = ["unresolved-proc-macro", "unresolved-extern-crate", "unresolved-import"]
+linkedProjects = ["/tmp/rust-project.json"]
+checkOnSave = false
+
+[language-server.rust-analyzer.config.rustc]
+source = "/nonexistent"
+
+[language-server.rust-analyzer.config.files]
+watcher = "client"
+
+[language-server.rust-analyzer.config.check]
+command = "check"
+invocationStrategy = "once"
+overrideCommand = []
+`,
         }),
         "/home": new Directory(),
+        "/helix-config/helix": new Directory({
+          "config.toml": "",
+        }),
+        "/helix-data/helix": new Directory({
+          "trusted_workspaces": "/tmp\n",
+        }),
+        "/helix-cache/helix": new Directory(),
         "/runtime": new Directory(runtimeFiles),
+        "/usr/bin": new Directory(
+          rustAnalyzerBytes
+            ? { "rust-analyzer": rustAnalyzerBytes }
+            : {},
+        ),
       },
     });
   } catch (e) {
@@ -156,6 +290,10 @@ fn main() {
   loading.classList.add("hidden");
   term.clear();
   term.focus();
+
+  // Re-fit after the loading overlay is hidden so the terminal gets the
+  // full viewport dimensions (the overlay may have affected layout).
+  fitAddon.fit();
 
   // 8. Wait for exit
   const output = await instance.wait();
