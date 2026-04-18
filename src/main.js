@@ -125,14 +125,16 @@ async function main() {
   const runtimeFileCount = Object.keys(runtimeFiles).length;
   term.write(`Loaded ${runtimeFileCount} runtime files\r\n`);
 
-  // 5. Load rust-analyzer and rustc for LSP support
+  // 5. Load rust-analyzer, rustc, and cargo for LSP support
   setStatus("Loading LSP tools...");
   let rustAnalyzerBytes = null;
   let rustcBytes = null;
+  let cargoBytes = null;
   try {
-    const [raResp, rcResp] = await Promise.all([
+    const [raResp, rcResp, cgResp] = await Promise.all([
       fetch("/rust-analyzer.wasm"),
       fetch("/rustc.wasm"),
+      fetch("/cargo.wasm"),
     ]);
     if (raResp.ok) {
       rustAnalyzerBytes = new Uint8Array(await raResp.arrayBuffer());
@@ -143,6 +145,11 @@ async function main() {
       rustcBytes = new Uint8Array(await rcResp.arrayBuffer());
       const rcSize = (rustcBytes.length / 1024 / 1024).toFixed(1);
       term.write(`Loaded rustc.wasm (${rcSize} MB)\r\n`);
+    }
+    if (cgResp.ok) {
+      cargoBytes = new Uint8Array(await cgResp.arrayBuffer());
+      const cgSize = (cargoBytes.length / 1024 / 1024).toFixed(1);
+      term.write(`Loaded cargo.wasm (${cgSize} MB)\r\n`);
     }
   } catch (e) {
     console.warn("LSP tools not found:", e);
@@ -254,6 +261,7 @@ overrideCommand = []
         "/usr/bin": new Directory({
           ...(rustAnalyzerBytes ? { "rust-analyzer": rustAnalyzerBytes } : {}),
           ...(rustcBytes ? { "rustc": rustcBytes } : {}),
+          ...(cargoBytes ? { "cargo": cargoBytes } : {}),
         }),
       },
     });
