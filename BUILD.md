@@ -81,7 +81,7 @@ rm -rf target/wasm32-wasmer-wasi
 
 # Build with -Zbuild-std for the fixed stdlib
 CARGO_BUILD_TARGET=wasm32-wasmer-wasi \
-  cargo +wasix build --release -p helix-term \
+  cargo +wasix-dev build --release -p helix-term \
   -Zbuild-std=std,panic_abort
 ```
 
@@ -220,4 +220,26 @@ Access at `http://localhost:5173`
 - **`signature_mismatch:*`**: FFI declaration mismatch — patch tree-house-bindings
 - **`null function`**: Grammar's GOT.func functions not placed in table
 - **`table index out of bounds`**: Table not grown enough for GOT.func entries
+- **`rust-analyzer LSP unresponsive (hover never returns)`**: `main_loop` deadlocks in
+  `PrimeCachesProgress::End` calling `trigger_garbage_collection()`. That goes through
+  salsa's `cancel_others`, which `cvar.wait`s until all snapshots drop to 1. Salsa's
+  cancellation relies on panic-unwinding to drop snapshots held by in-flight tasks
+  (e.g. `update_diagnostics`); with `panic = abort` the panic aborts the whole process
+  instead, so the in-flight task never drops its snapshot and the wait never completes.
+  **Fix**: rebuild r-a with panic=unwind and native WASM EH (new proposal). In
+  `~/dev/rust-analyzer/.cargo/config.toml`:
+  ```toml
+  [target.wasm32-wasmer-wasi]
+  rustflags = [
+    "-C", "panic=unwind",
+    "-C", "target-feature=+exception-handling",
+    "-C", "llvm-args=-wasm-enable-eh",
+    "-C", "llvm-args=-wasm-use-legacy-eh=false",
+  ]
+  ```
+  Build with `-Zbuild-std=std,panic_unwind` (not `panic_abort`). The legacy EH proposal
+  (`try/catch/rethrow`) won't work — wasmer requires the new `try_table`/`throw_ref` form.
+  Note: native `wasmer run` on Apple Silicon still traps (cranelift aarch64 EH is
+  incomplete); the browser path works because wasmer-js dispatches to the native
+  WebAssembly engine, which implements the new EH proposal.
 - **No syntax highlighting**: Check grammar exports `tree_sitter_*` with `-fvisibility=default`

@@ -90,7 +90,7 @@ async function main() {
 
   // 2. Initialize wasmer SDK
   setStatus("Loading WASIX runtime...");
-  await initWasmer({ log: "warn,wasmer_wasix::syscalls::wasix::dl_env=info" });
+  await initWasmer({ log: "warn,wasmer_wasix::debug=info,wasmer_wasix::syscalls::wasix::dl_env=info,wasmer_js::tasks::scheduler=info" });
   term.write("WASIX runtime loaded\r\n");
 
   // 3. Load and compile the helix wasm binary
@@ -181,6 +181,8 @@ async function main() {
         XDG_DATA_HOME: "/helix-data",
         XDG_CACHE_HOME: "/helix-cache",
         RUST_BACKTRACE: "full",
+        TOKIO_WORKER_THREADS: "2",
+        RAYON_NUM_THREADS: "1",
         COLUMNS: String(term.cols),
         LINES: String(term.rows),
       },
@@ -228,20 +230,26 @@ edition = "2021"
               },
             ],
           }),
-          ".helix/languages.toml": `[language-server.rust-analyzer.config]
+          ".helix/languages.toml": `[language-server.rust-analyzer]
+command = "rust-analyzer"
+args = ["--log-file", "/tmp/ra-log.txt"]
+timeout = 120
+
+[language-server.rust-analyzer.config]
 cargo.buildScripts.enable = false
-cargo.sysroot = "discover"
-cargo.sysrootSrc = "/nonexistent"
+cargo.sysroot = "none"
 procMacro.enable = false
 diagnostics.disabled = ["unresolved-proc-macro", "unresolved-extern-crate", "unresolved-import"]
 linkedProjects = ["/tmp/rust-project.json"]
 checkOnSave = false
+numThreads = 1
 
 [language-server.rust-analyzer.config.rustc]
 source = "/nonexistent"
 
 [language-server.rust-analyzer.config.files]
 watcher = "client"
+excludeDirs = ["/usr"]
 
 [language-server.rust-analyzer.config.check]
 command = "check"
