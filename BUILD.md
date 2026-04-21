@@ -69,7 +69,7 @@ sed -i '' 's/fn ts_query_cursor_set_byte_range(self_: \*mut QueryCursorData, sta
 
 ## Step 3: Build Helix for WASIX
 
-**CRITICAL**: Must use `-Zbuild-std=std,panic_abort` to compile std from the
+**CRITICAL**: Must use `-Zbuild-std=std,panic_unwind` to compile std from the
 wasix-rust source (which has the `home_dir()` fix). The pre-compiled std
 from cargo-wasix does NOT have this fix.
 
