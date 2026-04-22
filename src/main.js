@@ -51,7 +51,36 @@ function buildRustProjectJson(externalCrates) {
   return { sysroot_src: "/sysroot/library", crates };
 }
 
+// On GitHub Pages (which can't set COOP/COEP headers server-side) we use
+// coi-serviceworker to inject them client-side. On first visit the SW
+// registers async but doesn't always reload in time — so we check here
+// and force a reload once before the wasmer SDK tries to allocate
+// SharedArrayBuffer and explodes.
+async function ensureCrossOriginIsolated() {
+  const RELOADED = "coi-main-reloaded";
+  if (window.crossOriginIsolated) {
+    sessionStorage.removeItem(RELOADED);
+    return;
+  }
+  if (sessionStorage.getItem(RELOADED)) {
+    setStatus(
+      "Cross-origin isolation unavailable — hard-refresh (Cmd+Shift+R) to retry.",
+    );
+    throw new Error("cross-origin isolation failed");
+  }
+  setStatus("Waiting for cross-origin isolation service worker...");
+  try {
+    await navigator.serviceWorker?.ready;
+  } catch {}
+  sessionStorage.setItem(RELOADED, "1");
+  location.reload();
+  // location.reload() is async-ish; block here so callers don't continue.
+  await new Promise(() => {});
+}
+
 async function main() {
+  await ensureCrossOriginIsolated();
+
   // 1. Initialize ghostty-web terminal
   setStatus("Loading terminal...");
   await initGhostty();
