@@ -59,12 +59,23 @@ jobs:
         run: |
           sed -i '/<\/head>/i\    <script src="./coi-serviceworker.js"></script>' index.html
 
+      # User/org pages (repo named `<owner>.github.io`) serve at the root `/`;
+      # project pages (any other repo) serve at `/<repo-name>/`. Vite's `base`
+      # has to match, or built asset URLs 404 and the page serves raw source.
+      - name: Compute vite base
+        id: vitebase
+        run: |
+          name="${{ github.event.repository.name }}"
+          if [[ "$name" == *.github.io ]]; then
+            echo "base=/" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=/$name/" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build with vite
         run: pnpm build
         env:
-          # vite `base` for the GH Pages subpath. GITHUB_REPOSITORY=owner/repo;
-          # github.event.repository.name is just the repo half.
-          VITE_BASE: /${{ github.event.repository.name }}/
+          VITE_BASE: ${{ steps.vitebase.outputs.base }}
 
       - uses: actions/upload-pages-artifact@v3
         with:

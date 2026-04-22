@@ -359,6 +359,13 @@ linkedProjects = ["/tmp/rust-project.json"]
 checkOnSave = false
 numThreads = 1
 
+# Completion tuning. r-a's default is "return everything in scope and rank
+# it"; these trim the list aggressively and surface type-matching exprs.
+completion.limit = 30
+completion.termSearch.enable = true
+completion.autoimport.enable = false
+completion.postfix.enable = false
+
 [language-server.rust-analyzer.config.rustc]
 source = "/nonexistent"
 
