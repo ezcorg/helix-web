@@ -1,0 +1,81 @@
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only allow one in-flight deploy; queue new pushes behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      # On CI there's no sibling `../wasmer-js` checkout, so the local
+      # pnpm.overrides entry (link:../wasmer-js) would break `pnpm install`.
+      # Strip it before installing — CI resolves @joinezco/wasmersdk from
+      # npm instead.
+      - name: Drop local wasmer-js override
+        run: |
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            if (pkg.pnpm && pkg.pnpm.overrides) {
+              delete pkg.pnpm.overrides["@joinezco/wasmersdk"];
+            }
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - run: pnpm install --no-frozen-lockfile
+
+      # COOP/COEP headers are needed at runtime for SharedArrayBuffer, but
+      # GitHub Pages can't set custom headers server-side. We inject a
+      # service worker (coi-serviceworker) that synthesizes them client-side.
+      - name: Install coi-serviceworker
+        run: |
+          curl -fsSL -o public/coi-serviceworker.js \
+            https://raw.githubusercontent.com/gzuidhof/coi-serviceworker/master/coi-serviceworker.min.js
+
+      - name: Inject coi-serviceworker into index.html
+        run: |
+          sed -i '/<\/head>/i\    <script src="./coi-serviceworker.js"></script>' index.html
+
+      - name: Build with vite
+        run: pnpm build
+        env:
+          # vite `base` for the GH Pages subpath. GITHUB_REPOSITORY=owner/repo;
+          # github.event.repository.name is just the repo half.
+          VITE_BASE: /${{ github.event.repository.name }}/
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

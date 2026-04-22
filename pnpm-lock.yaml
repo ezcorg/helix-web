@@ -4,11 +4,14 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  '@joinezco/wasmersdk': link:../wasmer-js
+
 importers:
 
   .:
     dependencies:
-      '@wasmer/sdk':
+      '@joinezco/wasmersdk':
         specifier: link:../wasmer-js
         version: link:../wasmer-js
       ghostty-web:

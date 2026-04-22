@@ -1,3 +1,7 @@
+> [!NOTE]
+> some of this is true, some is slop
+
+
 # Building Helix for the Browser
 
 This documents the complete build process for running the Helix text editor
@@ -69,9 +73,9 @@ sed -i '' 's/fn ts_query_cursor_set_byte_range(self_: \*mut QueryCursorData, sta
 
 ## Step 3: Build Helix for WASIX
 
-**CRITICAL**: Must use `-Zbuild-std=std,panic_unwind` to compile std from the
-wasix-rust source (which has the `home_dir()` fix). The pre-compiled std
-from cargo-wasix does NOT have this fix.
+Must use `-Zbuild-std` to compile std from the wasix-rust source (which has
+the `home_dir()` fix). The pre-compiled std from cargo-wasix does NOT have
+this fix.
 
 ```bash
 cd ~/dev/helix
@@ -91,6 +95,39 @@ The `.cargo/config.toml` in helix provides:
 - These exports are needed by dynamically loaded grammar modules
 
 Output: `target/wasm32-wasmer-wasi/release/hx.wasm` (~22MB)
+
+## Step 3b: Build rust-analyzer for WASIX
+
+Separate build because r-a needs `panic=unwind` + native WASM EH — without
+it, salsa's `cancel_others` deadlocks the `main_loop` when
+`PrimeCachesProgress::End` fires.
+
+`~/dev/rust-analyzer/.cargo/config.toml` already has:
+```toml
+[target.wasm32-wasmer-wasi]
+rustflags = [
+  "-C", "panic=unwind",
+  "-C", "target-feature=+exception-handling",
+  "-C", "llvm-args=-wasm-enable-eh",
+  "-C", "llvm-args=-wasm-use-legacy-eh=false",
+]
+```
+
+```bash
+cd ~/dev/rust-analyzer
+CARGO_BUILD_TARGET=wasm32-wasmer-wasi \
+  cargo +wasix-dev build --release -p rust-analyzer \
+  -Zbuild-std=std,panic_unwind
+```
+
+Output: `target/wasm32-wasmer-wasi/release/rust-analyzer.wasm` (~50MB).
+Symlinked to `helix-web/public/rust-analyzer.wasm` in Step 7.
+
+`-wasm-use-legacy-eh=false` is load-bearing — without it LLVM emits the
+legacy `try/catch/rethrow` proposal, which our wasmer fork rejects
+("legacy_exceptions feature required"). Native `wasmer run` on Apple
+Silicon still traps on cranelift's incomplete aarch64 EH; the browser
+path (wasmer-js → native WebAssembly engine) runs fine.
 
 ## Step 4: Build Wasmer JS SDK
 
@@ -161,21 +198,38 @@ Key flags:
 
 ## Step 6: Bundle Runtime Files
 
+Three separate bundlers — each produces a JSON file mounted into the WASIX
+VFS at page load.
+
 ```bash
 cd ~/dev/helix-web
-node scripts/bundle-runtime.js
+node scripts/bundle-runtime.js   # queries + themes → public/runtime-bundle.json  (~2.1MB)
+node scripts/bundle-stdlib.js    # core/alloc/std/... → public/stdlib-bundle.json (~13MB)
+node scripts/bundle-crates.js    # external crate seed → public/crates-bundle.json (~0.1MB)
 ```
 
-This generates `public/runtime-bundle.json` (~2.1MB) containing query files
-(.scm) and themes for 331 languages.
+- `runtime-bundle.json` holds tree-sitter queries (.scm) and themes for
+  331 languages, mounted at `/runtime`.
+- `stdlib-bundle.json` walks `~/dev/wasix-rust/library/{core,alloc,std,...}/src/`
+  and is mounted at `/sysroot/library`. `rust-project.json` points
+  `sysroot_src` at it so r-a's stitched-sysroot loader picks up
+  `core`/`alloc`/`std` — that's what makes `&str`, `i32`, `String`, etc.
+  resolve for hover/type info.
+- `crates-bundle.json` walks a hardcoded SEED list of crates under
+  `~/.cargo/registry/src/index.crates.io-*/` and is mounted at `/crates`.
+  `main.js`'s `buildRustProjectJson()` synthesizes per-crate entries in
+  the rust-project.json `crates[]` array and wires them as deps of the
+  root `hello` crate, so `use anyhow::...` resolves. To add/remove
+  crates, edit `SEED` in `scripts/bundle-crates.js` and rerun.
 
 ## Step 7: Setup helix-web
 
 ```bash
 cd ~/dev/helix-web
 
-# Symlink the helix binary
+# Symlink the WASM binaries
 ln -sf ~/dev/helix/target/wasm32-wasmer-wasi/release/hx.wasm public/helix.wasm
+ln -sf ~/dev/rust-analyzer/target/wasm32-wasmer-wasi/release/rust-analyzer.wasm public/rust-analyzer.wasm
 
 # Install dependencies
 pnpm install
@@ -220,26 +274,13 @@ Access at `http://localhost:5173`
 - **`signature_mismatch:*`**: FFI declaration mismatch — patch tree-house-bindings
 - **`null function`**: Grammar's GOT.func functions not placed in table
 - **`table index out of bounds`**: Table not grown enough for GOT.func entries
-- **`rust-analyzer LSP unresponsive (hover never returns)`**: `main_loop` deadlocks in
-  `PrimeCachesProgress::End` calling `trigger_garbage_collection()`. That goes through
-  salsa's `cancel_others`, which `cvar.wait`s until all snapshots drop to 1. Salsa's
-  cancellation relies on panic-unwinding to drop snapshots held by in-flight tasks
-  (e.g. `update_diagnostics`); with `panic = abort` the panic aborts the whole process
-  instead, so the in-flight task never drops its snapshot and the wait never completes.
-  **Fix**: rebuild r-a with panic=unwind and native WASM EH (new proposal). In
-  `~/dev/rust-analyzer/.cargo/config.toml`:
-  ```toml
-  [target.wasm32-wasmer-wasi]
-  rustflags = [
-    "-C", "panic=unwind",
-    "-C", "target-feature=+exception-handling",
-    "-C", "llvm-args=-wasm-enable-eh",
-    "-C", "llvm-args=-wasm-use-legacy-eh=false",
-  ]
-  ```
-  Build with `-Zbuild-std=std,panic_unwind` (not `panic_abort`). The legacy EH proposal
-  (`try/catch/rethrow`) won't work — wasmer requires the new `try_table`/`throw_ref` form.
-  Note: native `wasmer run` on Apple Silicon still traps (cranelift aarch64 EH is
-  incomplete); the browser path works because wasmer-js dispatches to the native
-  WebAssembly engine, which implements the new EH proposal.
+- **`rust-analyzer LSP unresponsive (hover never returns)`**: historical —
+  fixed by building r-a with `panic=unwind` per Step 3b. If you see this,
+  ensure the r-a binary is from the panic=unwind build (`wasm-tools print
+  rust-analyzer.wasm | grep try_table` should match).
+- **Hover/completion on external crate symbols hangs**: first cross-crate
+  VFS touch never returns a response. Local hovers and stdlib hover on
+  primitives work. The crate graph is correctly wired; the hang is a
+  separate runtime issue (likely VFS or salsa orchestration). Not yet
+  diagnosed.
 - **No syntax highlighting**: Check grammar exports `tree_sitter_*` with `-fvisibility=default`

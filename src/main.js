@@ -1,5 +1,5 @@
 import { init as initGhostty, Terminal, FitAddon } from "ghostty-web";
-import { init as initWasmer, runWasix, Directory } from "@wasmer/sdk";
+import { init as initWasmer, runWasix, Directory } from "@joinezco/wasmersdk";
 
 const status = document.getElementById("status");
 const loading = document.getElementById("loading");
@@ -7,6 +7,48 @@ const loading = document.getElementById("loading");
 function setStatus(msg) {
   status.textContent = msg;
   console.log(`[helix-web] ${msg}`);
+}
+
+// Build the rust-project.json crate graph. The root crate (hello, index 0)
+// gets every external crate as a dep so `use serde::...` resolves without
+// the user editing anything. External crates' inter-deps come from the
+// bundle metadata (e.g. serde_json declares `serde` so r-a wires that).
+function buildRustProjectJson(externalCrates) {
+  const root = {
+    display_name: "hello",
+    root_module: "/tmp/hello.rs",
+    edition: "2021",
+    deps: [],
+    cfg: ['target_arch="wasm32"', 'target_os="wasi"'],
+    is_workspace_member: true,
+  };
+  const crates = [root];
+
+  // Index of each external crate by name, used for resolving inter-crate deps.
+  const indexByName = new Map();
+  externalCrates.forEach((c, i) => indexByName.set(c.name, i + 1)); // +1 for root at 0
+
+  for (const c of externalCrates) {
+    crates.push({
+      display_name: c.name,
+      root_module: `/crates/${c.dir}/src/lib.rs`,
+      edition: c.edition,
+      deps: c.deps
+        .map((d) => ({ crate: indexByName.get(d), name: d }))
+        .filter((d) => d.crate !== undefined),
+      cfg: ['target_arch="wasm32"', 'target_os="wasi"'],
+      is_workspace_member: false,
+    });
+  }
+
+  // Wire every external crate as a dep of the root so `use foo::bar` works
+  // out of the box from /tmp/hello.rs.
+  root.deps = externalCrates.map((c) => ({
+    crate: indexByName.get(c.name),
+    name: c.name,
+  }));
+
+  return { sysroot_src: "/sysroot/library", crates };
 }
 
 async function main() {
@@ -44,30 +86,40 @@ async function main() {
   });
 
   // -- Intercept modifier key combos at the document level so the browser
-  //    does not steal Ctrl+S (save dialog), Ctrl+W (close tab), Ctrl+N
-  //    (new window), etc. before they reach the terminal's InputHandler.
-  //    We only suppress defaults while the terminal element (or a descendant
-  //    like the hidden textarea) has focus.
+  //    does not steal Ctrl+S (save dialog), Ctrl+W (close tab), Tab (focus
+  //    shift), etc. before they reach the terminal's InputHandler. We only
+  //    suppress defaults while the terminal element (or a descendant like
+  //    the hidden textarea) has focus.
   document.addEventListener(
     "keydown",
     (e) => {
-      // Only intercept when the terminal (or its children) is focused
       if (!terminalEl.contains(document.activeElement)) return;
 
-      // Let the browser handle Cmd/Ctrl+V (paste), Cmd+C (copy), and
-      // Cmd/Ctrl+Shift+I / F12 (devtools) so those remain functional.
       const isMeta = e.metaKey;
       const isCtrl = e.ctrlKey;
-      if ((isMeta || isCtrl) && e.code === "KeyV") return;
-      if (isMeta && e.code === "KeyC") return;
+
+      // DevTools shortcuts — always let these through the browser.
       if ((isMeta || isCtrl) && e.shiftKey && e.code === "KeyI") return;
-      if (e.code === "F12") return;
-      // Also let Cmd/Ctrl+Shift+J (console), Cmd+Option+I (macOS devtools) through
       if ((isMeta || isCtrl) && e.shiftKey && e.code === "KeyJ") return;
       if (isMeta && e.altKey && e.code === "KeyI") return;
+      if (e.code === "F12") return;
 
-      // For any other modified key combo (Ctrl+S, Ctrl+C, Alt+X, etc.),
-      // prevent the browser's default action so the keydown event reaches
+      // Let the browser handle Cmd/Ctrl+V (paste) and Cmd+C (copy) so
+      // those remain functional from the browser chrome's POV. Ghostty's
+      // own paste listener fires for V and injects into the terminal.
+      if ((isMeta || isCtrl) && e.code === "KeyV") return;
+      if (isMeta && e.code === "KeyC") return;
+
+      // Tab: browser moves focus to the next tabstop by default. Swallow
+      // the default so focus stays in the terminal; ghostty's keydown
+      // handler will still receive the event and emit `\t`.
+      if (e.code === "Tab") {
+        e.preventDefault();
+        return;
+      }
+
+      // For any other modified key combo (Ctrl+S, Alt+X, etc.), prevent
+      // the browser's default action so the keydown event reaches
       // ghostty-web's InputHandler unimpeded.
       if (isCtrl || e.altKey || isMeta) {
         e.preventDefault();
@@ -75,6 +127,33 @@ async function main() {
     },
     { capture: true },
   );
+
+  // Declared up-front so the Alt-shortcut closure can capture stdinWriter —
+  // it's assigned after `runWasix` resolves below.
+  const encoder = new TextEncoder();
+  let stdinWriter = null;
+
+  // Alt/Option + <printable> → emit ESC + <key> (classic xterm sequence).
+  // On macOS, Option+T produces `e.key = "†"` (special char) with
+  // `e.altKey = true`; we want helix to see ESC+t, not ghostty's CSI-u
+  // encoding which helix doesn't recognize. We derive the unmodified key
+  // from `e.code` (e.g. "KeyT" → "t", "Digit5" → "5"). Returning `true`
+  // tells ghostty to skip its own encoder for this event.
+  function handleAltShortcut(e) {
+    if (!e.altKey || e.ctrlKey || e.metaKey) return false;
+    let base = null;
+    if (/^Key[A-Z]$/.test(e.code)) {
+      base = e.code.slice(3).toLowerCase();
+      if (e.shiftKey) base = base.toUpperCase();
+    } else if (/^Digit[0-9]$/.test(e.code)) {
+      base = e.code.slice(5);
+    }
+    if (base === null) return false;
+    if (stdinWriter) stdinWriter.write(encoder.encode("\x1b" + base));
+    return true;
+  }
+
+  term.attachCustomKeyEventHandler(handleAltShortcut);
 
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
@@ -104,6 +183,46 @@ async function main() {
   setStatus("Loading runtime files...");
   const runtimeResp = await fetch("/runtime-bundle.json");
   const runtimeFiles = await runtimeResp.json();
+
+  // Load stdlib sources so rust-analyzer can resolve built-in types
+  // (str, i32, String, Vec, ...). Mounted at /sysroot/library and referenced
+  // from rust-project.json `sysroot_src` → r-a's stitched-sysroot loader
+  // picks up <crate>/src/lib.rs for core/alloc/std/... directly.
+  setStatus("Loading stdlib sources...");
+  let stdlibFiles = {};
+  try {
+    const stdlibResp = await fetch("/stdlib-bundle.json");
+    if (stdlibResp.ok) {
+      stdlibFiles = await stdlibResp.json();
+      const stdlibSize = (
+        parseInt(stdlibResp.headers.get("content-length") || "0", 10) /
+        1024 /
+        1024
+      ).toFixed(1);
+      term.write(
+        `Loaded ${Object.keys(stdlibFiles).length} stdlib files (${stdlibSize} MB)\r\n`,
+      );
+    }
+  } catch (e) {
+    console.warn("stdlib bundle not found:", e);
+  }
+
+  // Load external crate sources (anyhow, serde, ...) so r-a can resolve
+  // `use foo::bar` from non-stdlib crates. Mounted at /crates/<dir>/, with
+  // crate metadata wired into rust-project.json's crates[] array below.
+  setStatus("Loading external crates...");
+  let cratesBundle = { files: {}, crates: [] };
+  try {
+    const cratesResp = await fetch("/crates-bundle.json");
+    if (cratesResp.ok) {
+      cratesBundle = await cratesResp.json();
+      term.write(
+        `Loaded ${cratesBundle.crates.length} external crates (${Object.keys(cratesBundle.files).length} files)\r\n`,
+      );
+    }
+  } catch (e) {
+    console.warn("crates bundle not found:", e);
+  }
 
   // Load compiled grammar .wasm files
   const grammarNames = [
@@ -196,8 +315,17 @@ async function main() {
 }
 `,
           "hello.rs": `// Helix running on WASIX in your browser!
-fn main() {
-    let message = "Hello from WebAssembly!";
+use anyhow::{anyhow, Result};
+
+fn greet(name: &str) -> Result<String> {
+    if name.is_empty() {
+        return Err(anyhow!("name must not be empty"));
+    }
+    Ok(format!("Hello, {}!", name))
+}
+
+fn main() -> Result<()> {
+    let message = greet("WebAssembly")?;
     println!("{}", message);
 
     for i in 0..10 {
@@ -207,6 +335,8 @@ fn main() {
             println!("odd: {}", i);
         }
     }
+
+    Ok(())
 }
 `,
           "Cargo.toml": `[package]
@@ -214,22 +344,7 @@ name = "hello"
 version = "0.1.0"
 edition = "2021"
 `,
-          "rust-project.json": JSON.stringify({
-            sysroot_src: null,
-            crates: [
-              {
-                display_name: "hello",
-                root_module: "/tmp/hello.rs",
-                edition: "2021",
-                deps: [],
-                cfg: [
-                  "target_arch=\"wasm32\"",
-                  "target_os=\"wasi\"",
-                ],
-                is_workspace_member: true,
-              },
-            ],
-          }),
+          "rust-project.json": JSON.stringify(buildRustProjectJson(cratesBundle.crates)),
           ".helix/languages.toml": `[language-server.rust-analyzer]
 command = "rust-analyzer"
 args = ["--log-file", "/tmp/ra-log.txt"]
@@ -239,7 +354,7 @@ timeout = 120
 cargo.buildScripts.enable = false
 cargo.sysroot = "none"
 procMacro.enable = false
-diagnostics.disabled = ["unresolved-proc-macro", "unresolved-extern-crate", "unresolved-import"]
+diagnostics.disabled = ["unresolved-proc-macro"]
 linkedProjects = ["/tmp/rust-project.json"]
 checkOnSave = false
 numThreads = 1
@@ -259,13 +374,17 @@ overrideCommand = []
         }),
         "/home": new Directory(),
         "/helix-config/helix": new Directory({
-          "config.toml": "",
+          // Bump idle-timeout from 250ms (default) → 750ms so r-a isn't
+          // hammered with completion/diagnostic requests on every keystroke.
+          "config.toml": "[editor]\nidle-timeout = 750\n",
         }),
         "/helix-data/helix": new Directory({
           "trusted_workspaces": "/tmp\n",
         }),
         "/helix-cache/helix": new Directory(),
         "/runtime": new Directory(runtimeFiles),
+        "/sysroot/library": new Directory(stdlibFiles),
+        "/crates": new Directory(cratesBundle.files),
         "/usr/bin": new Directory({
           ...(rustAnalyzerBytes ? { "rust-analyzer": rustAnalyzerBytes } : {}),
           ...(rustcBytes ? { "rustc": rustcBytes } : {}),
@@ -279,9 +398,9 @@ overrideCommand = []
     return;
   }
 
-  // 6. Bridge stdin/stdout/stderr
-  const encoder = new TextEncoder();
-  const stdinWriter = instance.stdin?.getWriter();
+  // 6. Bridge stdin/stdout/stderr (encoder declared earlier for the
+  // clipboard-paste closure).
+  stdinWriter = instance.stdin?.getWriter();
 
   term.onData((data) => {
     if (stdinWriter) {

@@ -13,8 +13,13 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@wasmer/sdk": "link:../wasmer-js",
+    "@joinezco/wasmersdk": "^0.11.0",
     "ghostty-web": "^0.4.0",
     "vite": "^8.0.8"
+  },
+  "pnpm": {
+    "overrides": {
+      "@joinezco/wasmersdk": "link:../wasmer-js"
+    }
   }
 }
