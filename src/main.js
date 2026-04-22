@@ -52,30 +52,66 @@ function buildRustProjectJson(externalCrates) {
 }
 
 // On GitHub Pages (which can't set COOP/COEP headers server-side) we use
-// coi-serviceworker to inject them client-side. On first visit the SW
-// registers async but doesn't always reload in time — so we check here
-// and force a reload once before the wasmer SDK tries to allocate
-// SharedArrayBuffer and explodes.
+// coi-serviceworker to inject them client-side. Reloads can land before the
+// SW has taken control — without isolation wasmer-sdk crashes on its first
+// SharedArrayBuffer allocation. We poll for the SW to control the page, then
+// reload. Bounded retry with a visible "Try again" button on failure so the
+// user doesn't have to close the tab to recover.
 async function ensureCrossOriginIsolated() {
-  const RELOADED = "coi-main-reloaded";
+  const KEY = "coi-reload-count";
+  const MAX_RETRIES = 3;
   if (window.crossOriginIsolated) {
-    sessionStorage.removeItem(RELOADED);
+    sessionStorage.removeItem(KEY);
     return;
   }
-  if (sessionStorage.getItem(RELOADED)) {
-    setStatus(
-      "Cross-origin isolation unavailable — hard-refresh (Cmd+Shift+R) to retry.",
+  const count = parseInt(sessionStorage.getItem(KEY) || "0", 10);
+  if (count >= MAX_RETRIES) {
+    showCoiRetryButton();
+    throw new Error(
+      `cross-origin isolation failed after ${MAX_RETRIES} attempts`,
     );
-    throw new Error("cross-origin isolation failed");
   }
-  setStatus("Waiting for cross-origin isolation service worker...");
+  sessionStorage.setItem(KEY, String(count + 1));
+  setStatus(
+    `Registering cross-origin isolation... (attempt ${count + 1}/${MAX_RETRIES})`,
+  );
+
+  // Wait for the SW to be ready AND to actually control this page. On a
+  // fresh reload `navigator.serviceWorker.controller` is null until the SW
+  // wins the race for control — `controllerchange` fires once that happens.
   try {
     await navigator.serviceWorker?.ready;
+    if (!navigator.serviceWorker.controller) {
+      await new Promise((resolve) => {
+        navigator.serviceWorker.addEventListener("controllerchange", resolve, {
+          once: true,
+        });
+        setTimeout(resolve, 3000);
+      });
+    }
   } catch {}
-  sessionStorage.setItem(RELOADED, "1");
+
   location.reload();
-  // location.reload() is async-ish; block here so callers don't continue.
+  // location.reload() is async — block so callers don't continue past us.
   await new Promise(() => {});
+}
+
+function showCoiRetryButton() {
+  const loading = document.getElementById("loading");
+  if (!loading) return;
+  loading.innerHTML = `
+    <div>Cross-origin isolation failed</div>
+    <div style="color:#6060a0;font-size:12px">
+      This can happen on rapid refresh. The service worker didn't take control in time.
+    </div>
+    <button id="coi-retry" style="padding:8px 16px;margin-top:8px;background:#3a3a5e;color:#e0e0e0;border:1px solid #5050a0;border-radius:4px;font:inherit;cursor:pointer">
+      Try again
+    </button>
+  `;
+  document.getElementById("coi-retry").addEventListener("click", () => {
+    sessionStorage.removeItem("coi-reload-count");
+    location.reload();
+  });
 }
 
 async function main() {
