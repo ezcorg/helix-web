@@ -59,41 +59,60 @@ function buildRustProjectJson(externalCrates) {
 // user doesn't have to close the tab to recover.
 async function ensureCrossOriginIsolated() {
   const KEY = "coi-reload-count";
-  const MAX_RETRIES = 3;
   if (window.crossOriginIsolated) {
     sessionStorage.removeItem(KEY);
     return;
   }
   const count = parseInt(sessionStorage.getItem(KEY) || "0", 10);
-  if (count >= MAX_RETRIES) {
-    showCoiRetryButton();
-    throw new Error(
-      `cross-origin isolation failed after ${MAX_RETRIES} attempts`,
-    );
-  }
   sessionStorage.setItem(KEY, String(count + 1));
-  setStatus(
-    `Registering cross-origin isolation... (attempt ${count + 1}/${MAX_RETRIES})`,
-  );
 
-  // Wait for the SW to be ready AND to actually control this page. On a
-  // fresh reload `navigator.serviceWorker.controller` is null until the SW
-  // wins the race for control — `controllerchange` fires once that happens.
-  try {
-    await navigator.serviceWorker?.ready;
-    if (!navigator.serviceWorker.controller) {
-      await new Promise((resolve) => {
-        navigator.serviceWorker.addEventListener("controllerchange", resolve, {
-          once: true,
+  // Attempt 1: SW might just not be controlling yet — wait for it + reload.
+  if (count === 0) {
+    setStatus("Registering cross-origin isolation service worker...");
+    try {
+      await navigator.serviceWorker?.ready;
+      if (!navigator.serviceWorker.controller) {
+        await new Promise((resolve) => {
+          navigator.serviceWorker.addEventListener(
+            "controllerchange",
+            resolve,
+            { once: true },
+          );
+          setTimeout(resolve, 3000);
         });
-        setTimeout(resolve, 3000);
-      });
-    }
-  } catch {}
+      }
+    } catch {}
+    location.reload();
+    await new Promise(() => {});
+    return;
+  }
 
-  location.reload();
-  // location.reload() is async — block so callers don't continue past us.
-  await new Promise(() => {});
+  // Attempt 2: the SW is stuck (installed but not providing isolation, or
+  // activated in a broken state after an update). Unregister everything and
+  // clear coi-serviceworker's own session flags so the next load does a
+  // fresh registration. This is what manually "unregistering the service
+  // worker in DevTools" was doing.
+  if (count === 1) {
+    setStatus(
+      "Service worker stuck — unregistering and retrying with a fresh one...",
+    );
+    try {
+      const regs = (await navigator.serviceWorker?.getRegistrations()) || [];
+      await Promise.all(regs.map((r) => r.unregister()));
+    } catch {}
+    // coi-serviceworker gates re-registration on this flag — clear it so
+    // the next load registers cleanly.
+    sessionStorage.removeItem("coiReloadedBySelf");
+    sessionStorage.removeItem("coiCoepHasFailed");
+    location.reload();
+    await new Promise(() => {});
+    return;
+  }
+
+  // Attempt 3+: even a fresh SW didn't produce isolation. Show a retry
+  // button rather than trapping the user.
+  showCoiRetryButton();
+  throw new Error("cross-origin isolation failed after unregister + retry");
 }
 
 function showCoiRetryButton() {
@@ -108,8 +127,17 @@ function showCoiRetryButton() {
       Try again
     </button>
   `;
-  document.getElementById("coi-retry").addEventListener("click", () => {
+  document.getElementById("coi-retry").addEventListener("click", async () => {
+    // Hand-roll the unregister path: if the SW is stuck, another vanilla
+    // reload will land in the same broken state. Nuking the registration
+    // matches what DevTools → Application → Unregister does.
+    try {
+      const regs = (await navigator.serviceWorker?.getRegistrations()) || [];
+      await Promise.all(regs.map((r) => r.unregister()));
+    } catch {}
     sessionStorage.removeItem("coi-reload-count");
+    sessionStorage.removeItem("coiReloadedBySelf");
+    sessionStorage.removeItem("coiCoepHasFailed");
     location.reload();
   });
 }
