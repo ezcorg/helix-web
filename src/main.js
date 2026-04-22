@@ -172,16 +172,20 @@ async function main() {
   await initWasmer({ log: "warn,wasmer_wasix::debug=info,wasmer_wasix::syscalls::wasix::dl_env=info,wasmer_js::tasks::scheduler=info" });
   term.write("WASIX runtime loaded\r\n");
 
+  // All asset fetches go through BASE so the paths work under both the
+  // vite dev server ("/") and GH Pages subpath deployments ("/helix-web/").
+  const BASE = import.meta.env.BASE_URL;
+
   // 3. Load and compile the helix wasm binary
   setStatus("Loading helix.wasm...");
-  const wasmResponse = await fetch("/helix.wasm");
+  const wasmResponse = await fetch(`${BASE}helix.wasm`);
   const wasmBytes = new Uint8Array(await wasmResponse.arrayBuffer());
   const wasmSize = (wasmBytes.length / 1024 / 1024).toFixed(1);
   term.write(`Loaded helix.wasm (${wasmSize} MB)\r\n`);
 
   // 4. Load runtime files (queries, themes) for syntax highlighting
   setStatus("Loading runtime files...");
-  const runtimeResp = await fetch("/runtime-bundle.json");
+  const runtimeResp = await fetch(`${BASE}runtime-bundle.json`);
   const runtimeFiles = await runtimeResp.json();
 
   // Load stdlib sources so rust-analyzer can resolve built-in types
@@ -191,7 +195,7 @@ async function main() {
   setStatus("Loading stdlib sources...");
   let stdlibFiles = {};
   try {
-    const stdlibResp = await fetch("/stdlib-bundle.json");
+    const stdlibResp = await fetch(`${BASE}stdlib-bundle.json`);
     if (stdlibResp.ok) {
       stdlibFiles = await stdlibResp.json();
       const stdlibSize = (
@@ -213,7 +217,7 @@ async function main() {
   setStatus("Loading external crates...");
   let cratesBundle = { files: {}, crates: [] };
   try {
-    const cratesResp = await fetch("/crates-bundle.json");
+    const cratesResp = await fetch(`${BASE}crates-bundle.json`);
     if (cratesResp.ok) {
       cratesBundle = await cratesResp.json();
       term.write(
@@ -231,7 +235,7 @@ async function main() {
   ];
   const grammarLoads = grammarNames.map(async (name) => {
     try {
-      const resp = await fetch(`/grammars/${name}.wasm`);
+      const resp = await fetch(`${BASE}grammars/${name}.wasm`);
       if (resp.ok) {
         runtimeFiles[`grammars/${name}.wasm`] = new Uint8Array(
           await resp.arrayBuffer(),
@@ -251,9 +255,9 @@ async function main() {
   let cargoBytes = null;
   try {
     const [raResp, rcResp, cgResp] = await Promise.all([
-      fetch("/rust-analyzer.wasm"),
-      fetch("/rustc.wasm"),
-      fetch("/cargo.wasm"),
+      fetch(`${BASE}rust-analyzer.wasm`),
+      fetch(`${BASE}rustc.wasm`),
+      fetch(`${BASE}cargo.wasm`),
     ]);
     if (raResp.ok) {
       rustAnalyzerBytes = new Uint8Array(await raResp.arrayBuffer());
