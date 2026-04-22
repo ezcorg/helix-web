@@ -10,6 +10,10 @@ export default defineConfig({
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
+    fs: {
+      // Allow serving files from one level up to the project root
+      allow: ['..'],
+    },
   },
   // Ensure .wasm files are served correctly
   assetsInclude: ["**/*.wasm"],
